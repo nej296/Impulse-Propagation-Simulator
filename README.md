@@ -47,6 +47,10 @@ This runs an example and saves `hh_example.png`.
 - **Ion concentrations:** [Na⁺]_out = 145 mM, [Na⁺]_in = 12 mM, [K⁺]_out = 4 mM, [K⁺]_in = 155 mM
 - E_Na and E_K are computed from Nernst; E_L is set so I_total = 0 at rest
 
+## Author
+
+Nicholas Johnson
+
 ## License
 
 MIT

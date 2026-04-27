@@ -139,6 +139,15 @@ def hh_deriv(t, y, eNa, eK, eL, i_inj, stim_on, stim_dur, stim_type, train_freq,
     return [dV, dm, dh, dn]
 
 
+def _rk4_step(t, y, dt, deriv):
+    """Single RK4 integration step."""
+    k1 = np.asarray(deriv(t, y))
+    k2 = np.asarray(deriv(t + 0.5 * dt, y + 0.5 * dt * k1))
+    k3 = np.asarray(deriv(t + 0.5 * dt, y + 0.5 * dt * k2))
+    k4 = np.asarray(deriv(t + dt, y + dt * k3))
+    return y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+
 def run_simulation(
     i_inj=0,
     stim_on=5,
@@ -147,6 +156,8 @@ def run_simulation(
     train_freq=50,
     train_n=5,
     win_ms=100,
+    dt=0.01,
+    method="rk4",
 ):
     """Run HH simulation and return t, V, m, h, n, iNa, iK, iL, eNa, eK, eL."""
     eNa = nernst(1, NA_OUT, NA_IN)
@@ -160,19 +171,27 @@ def run_simulation(
             t, y, eNa, eK, eL, i_inj, stim_on, stim_dur, stim_type, train_freq, train_n
         )
 
-    sol = solve_ivp(
-        deriv,
-        [0, win_ms],
-        y0,
-        method="RK45",
-        t_eval=np.arange(0, win_ms, 0.01),
-        rtol=1e-8,
-        atol=1e-10,
-    )
+    t = np.arange(0, win_ms + dt, dt)
 
-    t = sol.t
-    V = sol.y[0]
-    m, h, n = sol.y[1], sol.y[2], sol.y[3]
+    if method == "rk4":
+        y = np.zeros((len(t), 4), dtype=float)
+        y[0] = y0
+        for i in range(1, len(t)):
+            y[i] = _rk4_step(t[i - 1], y[i - 1], dt, deriv)
+        V = y[:, 0]
+        m, h, n = y[:, 1], y[:, 2], y[:, 3]
+    else:
+        sol = solve_ivp(
+            deriv,
+            [0, win_ms],
+            y0,
+            method="RK45",
+            t_eval=t,
+            rtol=1e-8,
+            atol=1e-10,
+        )
+        V = sol.y[0]
+        m, h, n = sol.y[1], sol.y[2], sol.y[3]
 
     iNa = G_NA * m**3 * h * (V - eNa)
     iK = G_K * n**4 * (V - eK)
@@ -192,6 +211,7 @@ def run_propagation(
     n_comp=40,
     dx_um=100,
     g_coupling=5.0,
+    dt=0.025,
 ):
     """Multi-compartment cable model.
 
@@ -245,10 +265,10 @@ def run_propagation(
         [0, win_ms],
         y0,
         method="RK45",
-        t_eval=np.arange(0, win_ms, 0.05),
+        t_eval=np.arange(0, win_ms + dt, dt),
         rtol=1e-5,
         atol=1e-7,
-        max_step=0.1,
+        max_step=max(0.05, dt * 2),
     )
 
     t   = sol.t

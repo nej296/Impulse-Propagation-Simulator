@@ -1,295 +1,362 @@
-"""
-Hodgkin-Huxley Neuron Simulator — Interactive Streamlit App
-"""
+"""Advanced Hodgkin-Huxley Neuron Simulator — Streamlit dashboard."""
 
 import time
-import streamlit as st
 import numpy as np
+import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.signal import find_peaks
-from hodgkin_huxley import run_simulation, run_propagation, get_i_inj, V_REST
+
+from hodgkin_huxley import (
+    G_K,
+    G_L,
+    G_NA,
+    V_REST,
+    get_i_inj,
+    run_propagation,
+    run_simulation,
+)
 
 st.set_page_config(
-    page_title="Hodgkin-Huxley Neuron Simulator",
-    page_icon="🧠",
+    page_title="Impulse Propagation Studio",
+    page_icon="⚡",
     layout="wide",
 )
 
-st.title("Hodgkin-Huxley Neuron Simulator")
-st.caption("Computational model of squid axon — Hodgkin & Huxley 1952")
-st.markdown("---")
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.header("Current Clamp")
-
-st.sidebar.subheader("Stimulus")
-i_inj    = st.sidebar.number_input("I_inj (A)",     min_value=-20.0, max_value=50.0,
-                                    value=0.0, step=0.1, format="%.1f")
-stim_on  = st.sidebar.number_input("Onset (ms)",    min_value=0.0,  value=5.0,  step=0.5)
-stim_dur = st.sidebar.number_input("Duration (ms)", min_value=0.1,  value=1.0,  step=0.1)
-stim_type = st.sidebar.selectbox("Type", ["Single pulse", "Pulse train", "Step current"])
-stim_type_val = {"Single pulse": "pulse", "Pulse train": "train", "Step current": "step"}[stim_type]
-
-train_freq, train_n = 50, 5
-if stim_type_val == "train":
-    train_freq = st.sidebar.number_input("Freq (Hz)", min_value=1, value=50)
-    train_n    = st.sidebar.number_input("Pulses",    min_value=1, value=5)
-
-st.sidebar.subheader("Simulation")
-win_ms      = st.sidebar.number_input("Window (ms)", min_value=20, value=100, step=10)
-propagation = st.sidebar.checkbox("Show AP Propagation along axon", value=False)
-anim_speed  = st.sidebar.slider("Animation speed", 1, 10, 5)
-show_refs   = st.sidebar.checkbox("Show E_Na / E_K / threshold", value=False)
-
-st.sidebar.info("Time step: 0.01 ms (RK45)")
-run_btn = st.sidebar.button("▶  Run & Animate", use_container_width=True, type="primary")
-
-if st.sidebar.button("Reset to Defaults"):
-    st.session_state.clear()
-    st.rerun()
-
-# ── Simulation — auto-reruns on every parameter change ───────────────────────
-@st.cache_data
-def cached_sim(i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms):
-    return run_simulation(
-        i_inj=i_inj, stim_on=stim_on, stim_dur=stim_dur,
-        stim_type=stim_type_val, train_freq=train_freq,
-        train_n=train_n, win_ms=win_ms,
-    )
-
-@st.cache_data
-def cached_propagation(i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms):
-    return run_propagation(
-        i_inj=i_inj, stim_on=stim_on, stim_dur=stim_dur,
-        stim_type=stim_type_val, train_freq=train_freq,
-        train_n=train_n, win_ms=win_ms,
-    )
-
-t, V, m, h, n, iNa, iK, iL, eNa, eK, eL = cached_sim(
-    i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
+st.markdown(
+    """
+    <style>
+        .block-container {padding-top: 1.2rem; padding-bottom: 1.0rem;}
+        .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
+            font-size: 0.96rem;
+        }
+        .app-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+            letter-spacing: -0.01em;
+        }
+        .subtitle {color: #4a5568; margin-bottom: 1rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-I_stim = np.array([
-    get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-    for ti in t
-])
-stim_mask = I_stim != 0
+st.markdown('<div class="app-title">⚡ Impulse Propagation Studio</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">Scientifically grounded Hodgkin–Huxley exploration with real-time electrophysiology views.</div>',
+    unsafe_allow_html=True,
+)
 
-ap_peaks, _ = find_peaks(V, height=0, distance=50)
-ap_fired    = len(ap_peaks) > 0
+if "playing" not in st.session_state:
+    st.session_state.playing = False
 
-# ── AP status banner ──────────────────────────────────────────────────────────
-if i_inj == 0:
-    st.info("Set I_inj and the graph updates instantly. Use **▶ Run & Animate** for real-time playback.")
-elif ap_fired:
-    if propagation:
-        st.success(f"Action potential fired — propagating along axon. Peak: {V[ap_peaks[0]]:.1f} mV")
-    else:
-        st.success(f"Action potential fired — {len(ap_peaks)} AP(s). Peak: {V[ap_peaks[0]]:.1f} mV")
-else:
-    st.warning("Sub-threshold — no action potential. Increase I_inj or duration.")
+# Sidebar
+with st.sidebar:
+    st.header("Experiment setup")
+    i_inj = st.slider("Injected current density (µA/cm²)", -20.0, 100.0, 10.0, 0.5)
+    stim_type = st.selectbox("Stimulus waveform", ["Single pulse", "Pulse train", "Step current"])
+    stim_type_val = {"Single pulse": "pulse", "Pulse train": "train", "Step current": "step"}[stim_type]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def _stim_intervals(mask, t):
-    starts, ends, in_stim = [], [], False
-    for i, active in enumerate(mask):
-        if active and not in_stim:
-            starts.append(t[i]); in_stim = True
-        elif not active and in_stim:
-            ends.append(t[i]); in_stim = False
-    if in_stim:
+    c1, c2 = st.columns(2)
+    with c1:
+        stim_on = st.number_input("Onset (ms)", min_value=0.0, value=5.0, step=0.5)
+    with c2:
+        stim_dur = st.number_input("Duration (ms)", min_value=0.1, value=1.0, step=0.1)
+
+    train_freq, train_n = 60, 5
+    if stim_type_val == "train":
+        c3, c4 = st.columns(2)
+        with c3:
+            train_freq = st.number_input("Train frequency (Hz)", min_value=1, value=60)
+        with c4:
+            train_n = st.number_input("Pulses", min_value=1, value=5)
+
+    st.divider()
+    st.subheader("Numerics")
+    win_ms = st.slider("Simulation window (ms)", 20, 200, 80, 10)
+    dt = st.select_slider("Time step dt (ms)", options=[0.005, 0.01, 0.02, 0.05], value=0.01)
+    live_speed = st.slider("Playback speed", 1, 12, 6)
+    show_refs = st.checkbox("Show reversal/reference lines", value=True)
+
+    st.divider()
+    propagation = st.toggle("Cable propagation view", value=False)
+    n_comp = st.slider("Cable compartments", 10, 80, 40, 5, disabled=not propagation)
+    g_coupling = st.slider("Axial coupling", 1.0, 12.0, 5.0, 0.5, disabled=not propagation)
+
+    st.divider()
+    play = st.button("▶ Play timeline", use_container_width=True, type="primary")
+    if st.button("⏹ Stop", use_container_width=True):
+        st.session_state.playing = False
+
+    if play:
+        st.session_state.playing = True
+
+
+@st.cache_data(show_spinner=False)
+def cached_simulation(i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms, dt):
+    return run_simulation(
+        i_inj=i_inj,
+        stim_on=stim_on,
+        stim_dur=stim_dur,
+        stim_type=stim_type_val,
+        train_freq=train_freq,
+        train_n=train_n,
+        win_ms=win_ms,
+        dt=dt,
+        method="rk4",
+    )
+
+
+@st.cache_data(show_spinner=False)
+def cached_propagation(i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms, n_comp, g_coupling):
+    return run_propagation(
+        i_inj=i_inj,
+        stim_on=stim_on,
+        stim_dur=stim_dur,
+        stim_type=stim_type_val,
+        train_freq=train_freq,
+        train_n=train_n,
+        win_ms=win_ms,
+        n_comp=n_comp,
+        g_coupling=g_coupling,
+    )
+
+
+def compute_stimulus(t):
+    return np.array(
+        [get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n) for ti in t]
+    )
+
+
+def stimulus_intervals(mask, t):
+    starts, ends = [], []
+    active = False
+    for i, m in enumerate(mask):
+        if m and not active:
+            starts.append(t[i])
+            active = True
+        elif not m and active:
+            ends.append(t[i])
+            active = False
+    if active:
         ends.append(t[-1])
     return starts, ends
 
-def _xtick_step(win_ms):
-    return 5 if win_ms <= 50 else 10 if win_ms <= 200 else 25
 
-# ── Colour palette for propagation traces ─────────────────────────────────────
-_PROP_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
-
-# ── Plotly figure (single compartment) ───────────────────────────────────────
-def build_figure(t_s, V_s, iNa_s, iK_s, iL_s, mask_s, eNa, eK, win_ms, show_refs):
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.14,
-        subplot_titles=("<b>Membrane Potential</b>", "<b>Membrane Current</b>"),
-    )
-
-    for s, e in zip(*_stim_intervals(mask_s, t_s)):
-        for row in [1, 2]:
-            fig.add_vrect(x0=s, x1=e, fillcolor="gold", opacity=0.20,
-                          layer="below", line_width=0, row=row, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=t_s, y=V_s, mode="lines", name="V_m",
-        line=dict(color="black", width=2),
-        hovertemplate="<b>t = %{x:.2f} ms</b><br>V_m = %{y:.2f} mV<extra></extra>",
-    ), row=1, col=1)
-
-    if show_refs:
-        for y_val, color, label in [
-            (eNa,    "red",    f"E_Na ({eNa:.0f} mV)"),
-            (eK,     "#1565c0", f"E_K ({eK:.0f} mV)"),
-            (V_REST, "gray",   f"Rest ({V_REST} mV)"),
-            (-55,    "orange", "Threshold (−55 mV)"),
-        ]:
-            fig.add_hline(y=y_val, line_dash="dash", line_color=color, line_width=1,
-                          opacity=0.6, row=1, col=1,
-                          annotation_text=label, annotation_position="right",
-                          annotation_font=dict(size=8, color=color))
-
-    i_total_s = iNa_s + iK_s + iL_s
-    fig.add_trace(go.Scatter(
-        x=t_s, y=i_total_s, mode="lines", name="I_membrane",
-        line=dict(color="black", width=2),
-        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_m = %{y:.2f} A<extra></extra>",
-    ), row=2, col=1)
-
-    fig.add_hline(y=0, line_color="#aaaaaa", line_width=0.8, row=2, col=1)
-
-    _apply_layout(fig, win_ms)
-    fig.update_yaxes(title_text="V_m (mV)",       range=[-100, 80], row=1, col=1)
-    fig.update_yaxes(title_text="I_membrane (A)",                    row=2, col=1)
-    return fig
+def add_stimulus_background(fig, t, mask, rows=(1, 2, 3)):
+    starts, ends = stimulus_intervals(mask, t)
+    for s, e in zip(starts, ends):
+        for r in rows:
+            fig.add_vrect(
+                x0=s,
+                x1=e,
+                fillcolor="#FFD166",
+                opacity=0.18,
+                layer="below",
+                line_width=0,
+                row=r,
+                col=1,
+            )
 
 
-# ── Plotly figure (propagation — 5 traces) ───────────────────────────────────
-def build_propagation_figure(t_s, V_traces_s, positions_um, mask_s, eNa, eK,
-                              win_ms, show_refs):
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.14,
-        subplot_titles=("<b>AP Propagation along Axon</b>",
-                        "<b>Stimulus (comp. 0)</b>"),
-        row_heights=[0.72, 0.28],
-    )
-
-    for s, e in zip(*_stim_intervals(mask_s, t_s)):
-        for row in [1, 2]:
-            fig.add_vrect(x0=s, x1=e, fillcolor="gold", opacity=0.20,
-                          layer="below", line_width=0, row=row, col=1)
-
-    for i, (V_s, pos_um) in enumerate(zip(V_traces_s, positions_um)):
-        label = f"{pos_um} µm"
-        fig.add_trace(go.Scatter(
-            x=t_s, y=V_s, mode="lines", name=label,
-            line=dict(color=_PROP_COLORS[i], width=2),
-            hovertemplate=f"<b>{label}</b><br>t = %{{x:.2f}} ms<br>V_m = %{{y:.2f}} mV<extra></extra>",
-        ), row=1, col=1)
-
-    if show_refs:
-        for y_val, color, label in [
-            (eNa,    "red",    f"E_Na ({eNa:.0f} mV)"),
-            (eK,     "#1565c0", f"E_K ({eK:.0f} mV)"),
-            (V_REST, "gray",   f"Rest ({V_REST} mV)"),
-            (-55,    "orange", "Threshold (−55 mV)"),
-        ]:
-            fig.add_hline(y=y_val, line_dash="dash", line_color=color, line_width=1,
-                          opacity=0.6, row=1, col=1,
-                          annotation_text=label, annotation_position="right",
-                          annotation_font=dict(size=8, color=color))
-
-    # Bottom panel: injected current pulse (comp 0)
-    I_stim_s = np.array([
-        get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-        for ti in t_s
-    ])
-    fig.add_trace(go.Scatter(
-        x=t_s, y=I_stim_s, mode="lines", name="I_inj",
-        line=dict(color="black", width=1.5),
-        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_inj = %{y:.2f} A<extra></extra>",
-    ), row=2, col=1)
-    fig.add_hline(y=0, line_color="#aaaaaa", line_width=0.8, row=2, col=1)
-
-    _apply_layout(fig, win_ms)
-    fig.update_yaxes(title_text="V_m (mV)", range=[-100, 80], row=1, col=1)
-    fig.update_yaxes(title_text="I_inj (A)",                   row=2, col=1)
-    return fig
-
-
-def _apply_layout(fig, win_ms):
-    tick_step = _xtick_step(win_ms)
-    xticks    = list(np.arange(0, win_ms + tick_step, tick_step))
-    fig.update_layout(
-        plot_bgcolor="white", paper_bgcolor="white",
-        hovermode="x unified", height=520,
-        margin=dict(l=70, r=110, t=55, b=50),
-        font=dict(color="black", size=11),
-        legend=dict(x=1.02, y=0.98, bgcolor="white",
-                    bordercolor="#cccccc", borderwidth=1),
-    )
-    for row in [1, 2]:
-        fig.update_xaxes(showgrid=False, showline=True, linecolor="black",
-                         ticks="outside", tickvals=xticks,
-                         range=[0, win_ms], mirror=False, row=row, col=1)
-    fig.update_xaxes(title_text="Time (ms)", row=2, col=1)
-    fig.update_yaxes(showgrid=False, showline=True, linecolor="black",
-                     ticks="outside", mirror=False)
-
-
-# ── Render ────────────────────────────────────────────────────────────────────
-plot_slot = st.empty()
-
-if propagation:
-    with st.spinner("Running cable model…"):
-        t_p, V_traces, positions_um, eNa_p, eK_p, _ = cached_propagation(
-            i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
+def add_reference_lines(fig, eNa, eK, eL):
+    if not show_refs:
+        return
+    refs = [
+        (eNa, "#e63946", f"E_Na {eNa:.1f} mV"),
+        (eK, "#1d4ed8", f"E_K {eK:.1f} mV"),
+        (eL, "#64748b", f"E_L {eL:.1f} mV"),
+        (V_REST, "#6b7280", f"Rest {V_REST} mV"),
+        (-55, "#f59e0b", "Threshold -55 mV"),
+    ]
+    for y, c, txt in refs:
+        fig.add_hline(
+            y=y,
+            line_dash="dot",
+            line_color=c,
+            line_width=1,
+            opacity=0.65,
+            row=1,
+            col=1,
+            annotation_text=txt,
+            annotation_position="right",
+            annotation_font=dict(size=9, color=c),
         )
 
-    I_stim_p = np.array([
-        get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-        for ti in t_p
-    ])
-    mask_p = I_stim_p != 0
 
-    if run_btn:
-        n_pts = len(t_p)
-        step  = max(1, n_pts // 200)
-        delay = 0.04 / (anim_speed / 5)
-        for end in range(step, n_pts + step, step * max(1, anim_speed // 3)):
-            end    = min(end, n_pts)
-            slices = [V[:end] for V in V_traces]
-            fig    = build_propagation_figure(
-                t_p[:end], slices, positions_um, mask_p[:end],
-                eNa_p, eK_p, win_ms, show_refs)
-            plot_slot.plotly_chart(fig, use_container_width=True)
-            time.sleep(delay)
-    else:
-        fig = build_propagation_figure(
-            t_p, V_traces, positions_um, mask_p,
-            eNa_p, eK_p, win_ms, show_refs)
-        plot_slot.plotly_chart(fig, use_container_width=True)
+def make_single_compartment_figure(t, V, iNa, iK, iL, Iinj, eNa, eK, eL):
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.45, 0.3, 0.25],
+        subplot_titles=("Membrane voltage", "Ionic current decomposition", "Input stimulus"),
+    )
 
+    mask = Iinj != 0
+    add_stimulus_background(fig, t, mask)
+
+    fig.add_trace(go.Scatter(x=t, y=V, mode="lines", name="V_m", line=dict(color="#111827", width=2.3)), row=1, col=1)
+    add_reference_lines(fig, eNa, eK, eL)
+
+    fig.add_trace(go.Scatter(x=t, y=iNa, mode="lines", name="I_Na", line=dict(color="#ef4444", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=t, y=iK, mode="lines", name="I_K", line=dict(color="#2563eb", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=t, y=iL, mode="lines", name="I_L", line=dict(color="#64748b", width=1.8)), row=2, col=1)
+    fig.add_trace(
+        go.Scatter(x=t, y=iNa + iK + iL, mode="lines", name="I_total", line=dict(color="#111827", width=2.2, dash="dash")),
+        row=2,
+        col=1,
+    )
+
+    fig.add_trace(go.Scatter(x=t, y=Iinj, mode="lines", name="I_inj", line=dict(color="#7c3aed", width=2)), row=3, col=1)
+
+    fig.update_layout(
+        hovermode="x unified",
+        height=830,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=50, r=35, t=80, b=35),
+    )
+    fig.update_xaxes(title="Time (ms)", row=3, col=1)
+    fig.update_yaxes(title="Voltage (mV)", row=1, col=1)
+    fig.update_yaxes(title="Current (µA/cm²)", row=2, col=1)
+    fig.update_yaxes(title="Current (µA/cm²)", row=3, col=1)
+    return fig
+
+
+def make_propagation_figure(t, V_traces, positions_um, Iinj):
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        row_heights=[0.72, 0.28],
+        subplot_titles=("Action potential propagation along cable", "Injected current at x=0"),
+    )
+
+    palette = ["#0f172a", "#2563eb", "#0f766e", "#b45309", "#dc2626"]
+    for i, (v, pos) in enumerate(zip(V_traces, positions_um)):
+        fig.add_trace(
+            go.Scatter(
+                x=t,
+                y=v,
+                mode="lines",
+                line=dict(width=2.2, color=palette[i % len(palette)]),
+                name=f"{pos} µm",
+            ),
+            row=1,
+            col=1,
+        )
+
+    mask = Iinj != 0
+    add_stimulus_background(fig, t, mask, rows=(1, 2))
+    fig.add_trace(go.Scatter(x=t, y=Iinj, mode="lines", name="I_inj", line=dict(color="#7c3aed", width=2)), row=2, col=1)
+
+    fig.update_layout(
+        hovermode="x unified",
+        height=700,
+        margin=dict(l=45, r=25, t=70, b=35),
+    )
+    fig.update_xaxes(title="Time (ms)", row=2, col=1)
+    fig.update_yaxes(title="Voltage (mV)", row=1, col=1)
+    fig.update_yaxes(title="Current (µA/cm²)", row=2, col=1)
+    return fig
+
+
+run_data = cached_simulation(i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms, dt)
+t, V, m, h, n, iNa, iK, iL, eNa, eK, eL = run_data
+Iinj = compute_stimulus(t)
+
+ap_peaks, _ = find_peaks(V, height=0, distance=max(1, int(2 / dt)))
+firing_rate_hz = len(ap_peaks) / (win_ms / 1000)
+
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+kpi1.metric("Peak voltage", f"{np.max(V):.1f} mV")
+kpi2.metric("AP count", f"{len(ap_peaks)}")
+kpi3.metric("Estimated firing rate", f"{firing_rate_hz:.1f} Hz")
+kpi4.metric("Min voltage", f"{np.min(V):.1f} mV")
+
+if len(ap_peaks) > 0:
+    st.success("Suprathreshold response detected. Real-time traces and ionic breakdown are synchronized to a fixed dt grid.")
 else:
-    if run_btn:
+    st.info("Subthreshold response. Increase amplitude or pulse duration to elicit spikes.")
+
+tab1, tab2, tab3 = st.tabs(["📈 Electrophysiology", "🧬 Gates & Conductance", "🧵 Cable Propagation"])
+
+with tab1:
+    fig = make_single_compartment_figure(t, V, iNa, iK, iL, Iinj, eNa, eK, eL)
+    slot = st.empty()
+
+    if st.session_state.playing:
         n_pts = len(t)
-        step  = max(1, n_pts // 200)
-        delay = 0.04 / (anim_speed / 5)
-        for end in range(step, n_pts + step, step * max(1, anim_speed // 3)):
-            end = min(end, n_pts)
-            fig = build_figure(t[:end], V[:end], iNa[:end], iK[:end], iL[:end],
-                               stim_mask[:end], eNa, eK, win_ms, show_refs)
-            plot_slot.plotly_chart(fig, use_container_width=True)
-            time.sleep(delay)
+        stride = max(1, n_pts // 220)
+        for end in range(stride, n_pts + stride, stride * max(1, live_speed // 2)):
+            if not st.session_state.playing:
+                break
+            j = min(end, n_pts)
+            partial = make_single_compartment_figure(
+                t[:j], V[:j], iNa[:j], iK[:j], iL[:j], Iinj[:j], eNa, eK, eL
+            )
+            slot.plotly_chart(partial, use_container_width=True)
+            time.sleep(0.025 / (live_speed / 6))
+        st.session_state.playing = False
     else:
-        fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
-        plot_slot.plotly_chart(fig, use_container_width=True)
+        slot.plotly_chart(fig, use_container_width=True)
 
-# ── Info ──────────────────────────────────────────────────────────────────────
-with st.expander("How to read the plots"):
-    st.markdown("""
-**Membrane Potential** — Black trace shows V_m. Gold shading = stimulus active.
+with tab2:
+    gNa = G_NA * (m ** 3) * h
+    gK = G_K * (n ** 4)
 
-**Membrane Current** — Total current (I_Na + I_K + I_L). Inward = negative, outward = positive.
-- Goes sharply negative during depolarisation (Na⁺ inward current dominates)
-- Crosses zero at the AP peak, then goes positive as K⁺ outward current takes over during repolarisation
-- Returns to zero at rest
+    fig_gates = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+                              subplot_titles=("Gate variables", "Effective conductances"))
+    fig_gates.add_trace(go.Scatter(x=t, y=m, mode="lines", name="m", line=dict(color="#ef4444", width=2)), row=1, col=1)
+    fig_gates.add_trace(go.Scatter(x=t, y=h, mode="lines", name="h", line=dict(color="#14b8a6", width=2)), row=1, col=1)
+    fig_gates.add_trace(go.Scatter(x=t, y=n, mode="lines", name="n", line=dict(color="#2563eb", width=2)), row=1, col=1)
 
-**Hover** anywhere on either chart to see exact (time, value) coordinates.
+    fig_gates.add_trace(go.Scatter(x=t, y=gNa, mode="lines", name="g_Na(t)", line=dict(color="#dc2626", width=2.1)), row=2, col=1)
+    fig_gates.add_trace(go.Scatter(x=t, y=gK, mode="lines", name="g_K(t)", line=dict(color="#1d4ed8", width=2.1)), row=2, col=1)
+    fig_gates.add_trace(go.Scatter(x=t, y=np.full_like(t, G_L), mode="lines", name="g_L", line=dict(color="#6b7280", width=1.8, dash="dot")), row=2, col=1)
 
-**Finding threshold:** Start at 0 A and increase I_inj in 0.1 steps.
-The status bar turns green when an AP fires. Typical threshold for a 1 ms pulse: **6–8 A**.
-    """)
+    fig_gates.update_layout(height=700, hovermode="x unified", margin=dict(l=45, r=25, t=70, b=35))
+    fig_gates.update_xaxes(title="Time (ms)", row=2, col=1)
+    fig_gates.update_yaxes(title="Gate value", range=[0, 1.05], row=1, col=1)
+    fig_gates.update_yaxes(title="Conductance (mS/cm²)", row=2, col=1)
+    st.plotly_chart(fig_gates, use_container_width=True)
+
+with tab3:
+    if not propagation:
+        st.info("Enable **Cable propagation view** in the sidebar to compute multi-compartment dynamics.")
+    else:
+        with st.spinner("Computing cable propagation..."):
+            tp, traces, positions_um, eNa_p, eK_p, eL_p = cached_propagation(
+                i_inj,
+                stim_on,
+                stim_dur,
+                stim_type_val,
+                train_freq,
+                train_n,
+                win_ms,
+                n_comp,
+                g_coupling,
+            )
+
+        Iinj_p = compute_stimulus(tp)
+        fig_prop = make_propagation_figure(tp, traces, positions_um, Iinj_p)
+        st.plotly_chart(fig_prop, use_container_width=True)
+
+        peaks = [tp[np.argmax(v)] for v in traces]
+        st.caption(
+            "Propagation timing (peak arrival): "
+            + ", ".join([f"{pos} µm → {tpk:.2f} ms" for pos, tpk in zip(positions_um, peaks)])
+        )
+
+with st.expander("Scientific notes"):
+    st.markdown(
+        """
+- The simulator uses classic Hodgkin–Huxley channel kinetics with conductance-based ionic currents.
+- Single-compartment traces use a fixed-step RK4 integrator so voltage and current samples are synchronized in time.
+- Sign convention: inward ionic current is negative; outward current is positive.
+- Conductance panel reports effective channel conductance: \(g_{Na}(t)=\bar{g}_{Na}m^3h\), \(g_K(t)=\bar{g}_Kn^4\).
+"""
+    )

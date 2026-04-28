@@ -3,6 +3,8 @@ Hodgkin-Huxley Neuron Simulator — Interactive Streamlit App
 """
 
 import time
+from datetime import timedelta
+
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
@@ -533,25 +535,24 @@ with params_col:
             st.session_state["anim_paused"] = False
             st.session_state["anim_end"] = 0
             st.session_state["anim_n_pts"] = 0
+            st.session_state["_anim_step_wall_t"] = 0.0
 
         if pause_btn and st.session_state["anim_active"]:
             st.session_state["anim_paused"] = not st.session_state["anim_paused"]
 
-with main_col:
-    st.markdown(
-        """
-        <section class="hero">
-            <h1>Impulse Propagation Simulator</h1>
-            <p>
-                Explore voltage-dependent Na⁺ and K⁺ currents (Chapter 3), threshold and regeneration,
-                and—in cable mode—how passive spread along the axon recruits the next segment’s active
-                response so the impulse stays full-sized.
-            </p>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
-    neuron_slot = st.empty()
+    st.session_state["_param_snapshot"] = {
+        "propagation": propagation,
+        "stacked_vm": stacked_vm,
+        "i_inj": float(i_inj),
+        "stim_on": float(stim_on),
+        "stim_dur": float(stim_dur),
+        "stim_type_val": stim_type_val,
+        "train_freq": int(train_freq),
+        "train_n": int(train_n),
+        "win_ms": int(win_ms),
+        "anim_speed": int(anim_speed),
+        "show_refs": bool(show_refs),
+    }
 
 # ── Simulation — auto-reruns on every parameter change ───────────────────────
 @st.cache_data
@@ -569,16 +570,6 @@ def cached_propagation(i_inj, stim_on, stim_dur, stim_type_val, train_freq, trai
         stim_type=stim_type_val, train_freq=train_freq,
         train_n=train_n, win_ms=win_ms,
     )
-
-t, V, m, h, n, iNa, iK, iL, eNa, eK, eL = cached_sim(
-    i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
-)
-
-I_stim = np.array([
-    get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-    for ti in t
-])
-stim_mask = I_stim != 0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _stim_intervals(mask, t):
@@ -903,83 +894,164 @@ def _sync_animation_config(n_pts, anim_speed):
         ss["anim_end"] = min(ss["anim_end"], n_pts)
 
 
-def _step_animation_after_render():
-    """Advance time index and rerun only after charts/animation are drawn."""
+def _advance_anim_in_fragment():
+    """Advance playback time index without st.rerun (used inside st.fragment)."""
     ss = st.session_state
-    if not ss["anim_active"] or ss["anim_paused"]:
+    if not ss.get("anim_active") or ss.get("anim_paused"):
         return
-    n_pts = ss["anim_n_pts"]
-    stride = ss["anim_stride"]
-    end = min(ss["anim_end"], n_pts)
-    if n_pts <= 0 or end >= n_pts:
+    n_pts = int(ss.get("anim_n_pts", 0))
+    if n_pts <= 0:
+        return
+    stride = int(ss.get("anim_stride", 1))
+    end = min(int(ss.get("anim_end", 0)), n_pts)
+    if end >= n_pts:
         ss["anim_active"] = False
         return
-    next_end = min(end + stride, n_pts)
-    ss["anim_end"] = next_end
-    time.sleep(ss["anim_delay_s"])
-    st.rerun()
+    now = time.monotonic()
+    if now - float(ss.get("_anim_step_wall_t", 0.0)) < float(ss.get("anim_delay_s", 0.04)):
+        return
+    ss["_anim_step_wall_t"] = now
+    ss["anim_end"] = min(end + stride, n_pts)
 
 
-# ── Render ────────────────────────────────────────────────────────────────────
-with main_col:
-    voltage_col, current_col = st.columns(2)
-    voltage_slot = voltage_col.empty()
-    current_slot = current_col.empty()
+@st.fragment(run_every=timedelta(milliseconds=80))
+def _playback_ui_fragment():
+    pb = st.session_state.get("_param_snapshot")
+    if not pb:
+        return
+    ss = st.session_state
 
-if propagation:
-    with st.spinner("Running cable model…"):
+    if pb["propagation"]:
         t_p, V_traces, positions_um, iNa_tr_p, i_pas_tr_p, h_tr_p, eNa_p, eK_p, _eLp = cached_propagation(
-            i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
+            pb["i_inj"], pb["stim_on"], pb["stim_dur"], pb["stim_type_val"],
+            pb["train_freq"], pb["train_n"], pb["win_ms"],
+        )
+        I_stim_p = np.array([
+            get_i_inj(
+                ti, pb["i_inj"], pb["stim_on"], pb["stim_dur"],
+                pb["stim_type_val"], pb["train_freq"], pb["train_n"],
+            )
+            for ti in t_p
+        ])
+        mask_p = I_stim_p != 0
+        n_pts = len(t_p)
+        _sync_animation_config(n_pts, pb["anim_speed"])
+        fig_sig = (
+            "cable",
+            n_pts,
+            pb["win_ms"],
+            round(pb["i_inj"], 4),
+            pb["stim_on"],
+            pb["stim_dur"],
+            pb["stim_type_val"],
+            pb["train_freq"],
+            pb["train_n"],
+            pb["stacked_vm"],
+            pb["show_refs"],
+        )
+        if ss.get("_playback_fig_sig") != fig_sig:
+            voltage_fig, current_fig = build_propagation_figure(
+                t_p, V_traces, iNa_tr_p, i_pas_tr_p, positions_um, mask_p,
+                eNa_p, eK_p, pb["win_ms"], pb["show_refs"],
+                stacked_voltage=pb["stacked_vm"],
+            )
+            ss["_voltage_fig"] = voltage_fig
+            ss["_current_fig"] = current_fig
+            ss["_playback_fig_sig"] = fig_sig
+        voltage_fig = ss["_voltage_fig"]
+        current_fig = ss["_current_fig"]
+
+        voltage_col, current_col = st.columns(2)
+        with voltage_col:
+            st.plotly_chart(voltage_fig, width="stretch", key="hh_voltage_plot")
+        with current_col:
+            st.plotly_chart(current_fig, width="stretch", key="hh_current_plot")
+
+        prog = ss["anim_end"] / n_pts if n_pts else 0.0
+        active = ss["anim_active"]
+        paused = ss["anim_paused"]
+        t_idx = min(max(ss["anim_end"], 0), max(0, n_pts - 1))
+        na_nodes, p_nodes = _propagation_animation_nodes(iNa_tr_p, i_pas_tr_p, t_idx)
+        refrac_nodes = _propagation_refrac_nodes(h_tr_p, t_idx)
+        neuron_slot = st.empty()
+        render_neuron_animation(
+            neuron_slot,
+            progress=prog,
+            is_running=active and not paused,
+            hold_pulse=active and paused,
+            node_active=na_nodes,
+            node_passive=p_nodes,
+            node_refrac=refrac_nodes,
+        )
+    else:
+        t, V, _m, _h, _n, iNa, iK, iL, eNa, eK, eL = cached_sim(
+            pb["i_inj"], pb["stim_on"], pb["stim_dur"], pb["stim_type_val"],
+            pb["train_freq"], pb["train_n"], pb["win_ms"],
+        )
+        I_stim = np.array([
+            get_i_inj(
+                ti, pb["i_inj"], pb["stim_on"], pb["stim_dur"],
+                pb["stim_type_val"], pb["train_freq"], pb["train_n"],
+            )
+            for ti in t
+        ])
+        stim_mask = I_stim != 0
+        n_pts = len(t)
+        _sync_animation_config(n_pts, pb["anim_speed"])
+        fig_sig = (
+            "single",
+            n_pts,
+            pb["win_ms"],
+            round(pb["i_inj"], 4),
+            pb["stim_on"],
+            pb["stim_dur"],
+            pb["stim_type_val"],
+            pb["train_freq"],
+            pb["train_n"],
+            pb["show_refs"],
+        )
+        if ss.get("_playback_fig_sig") != fig_sig:
+            voltage_fig, current_fig = build_figure(
+                t, V, iNa, iK, iL, stim_mask, eNa, eK, pb["win_ms"], pb["show_refs"],
+            )
+            ss["_voltage_fig"] = voltage_fig
+            ss["_current_fig"] = current_fig
+            ss["_playback_fig_sig"] = fig_sig
+        voltage_fig = ss["_voltage_fig"]
+        current_fig = ss["_current_fig"]
+
+        voltage_col, current_col = st.columns(2)
+        with voltage_col:
+            st.plotly_chart(voltage_fig, width="stretch", key="hh_voltage_plot")
+        with current_col:
+            st.plotly_chart(current_fig, width="stretch", key="hh_current_plot")
+
+        prog = ss["anim_end"] / n_pts if n_pts else 0.0
+        active = ss["anim_active"]
+        paused = ss["anim_paused"]
+        neuron_slot = st.empty()
+        render_neuron_animation(
+            neuron_slot,
+            progress=prog,
+            is_running=active and not paused,
+            hold_pulse=active and paused,
         )
 
-    I_stim_p = np.array([
-        get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-        for ti in t_p
-    ])
-    mask_p = I_stim_p != 0
+    _advance_anim_in_fragment()
 
-    n_pts = len(t_p)
-    _sync_animation_config(n_pts, anim_speed)
 
-    voltage_fig, current_fig = build_propagation_figure(
-        t_p, V_traces, iNa_tr_p, i_pas_tr_p, positions_um, mask_p,
-        eNa_p, eK_p, win_ms, show_refs, stacked_voltage=stacked_vm,
+with main_col:
+    st.markdown(
+        """
+        <section class="hero">
+            <h1>Impulse Propagation Simulator</h1>
+            <p>
+                Explore voltage-dependent Na⁺ and K⁺ currents (Chapter 3), threshold and regeneration,
+                and—in cable mode—how passive spread along the axon recruits the next segment’s active
+                response so the impulse stays full-sized.
+            </p>
+        </section>
+        """,
+        unsafe_allow_html=True,
     )
-    voltage_slot.plotly_chart(voltage_fig, width="stretch")
-    current_slot.plotly_chart(current_fig, width="stretch")
-
-    prog = st.session_state["anim_end"] / n_pts if n_pts else 0.0
-    active = st.session_state["anim_active"]
-    paused = st.session_state["anim_paused"]
-    t_idx = min(max(st.session_state["anim_end"], 0), max(0, n_pts - 1))
-    na_nodes, p_nodes = _propagation_animation_nodes(iNa_tr_p, i_pas_tr_p, t_idx)
-    refrac_nodes = _propagation_refrac_nodes(h_tr_p, t_idx)
-    render_neuron_animation(
-        neuron_slot,
-        progress=prog,
-        is_running=active and not paused,
-        hold_pulse=active and paused,
-        node_active=na_nodes,
-        node_passive=p_nodes,
-        node_refrac=refrac_nodes,
-    )
-    _step_animation_after_render()
-
-else:
-    n_pts = len(t)
-    _sync_animation_config(n_pts, anim_speed)
-
-    voltage_fig, current_fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
-    voltage_slot.plotly_chart(voltage_fig, width="stretch")
-    current_slot.plotly_chart(current_fig, width="stretch")
-
-    prog = st.session_state["anim_end"] / n_pts if n_pts else 0.0
-    active = st.session_state["anim_active"]
-    paused = st.session_state["anim_paused"]
-    render_neuron_animation(
-        neuron_slot,
-        progress=prog,
-        is_running=active and not paused,
-        hold_pulse=active and paused,
-    )
-    _step_animation_after_render()
+    _playback_ui_fragment()

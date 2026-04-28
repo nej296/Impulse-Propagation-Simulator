@@ -883,8 +883,8 @@ def _propagation_refrac_nodes(h_traces, t_idx):
     ]
 
 
-def _advance_sweep_animation(n_pts, anim_speed):
-    """Step the sweep once per rerun; supports pause via session_state."""
+def _sync_animation_config(n_pts, anim_speed):
+    """Keep stride/delay cached and clamp anim_end; run before drawing."""
     ss = st.session_state
     step = max(1, n_pts // 200)
     stride = step * max(1, anim_speed // 3)
@@ -900,24 +900,23 @@ def _advance_sweep_animation(n_pts, anim_speed):
         ss["anim_step"] = step
         ss["anim_stride"] = stride
         ss["anim_delay_s"] = delay
-        if ss["anim_active"] and ss["anim_end"] == 0:
-            ss["anim_end"] = min(stride, n_pts)
-        else:
-            ss["anim_end"] = min(ss["anim_end"], n_pts)
-        if not ss["anim_active"]:
-            return
+        ss["anim_end"] = min(ss["anim_end"], n_pts)
 
+
+def _step_animation_after_render():
+    """Advance time index and rerun only after charts/animation are drawn."""
+    ss = st.session_state
     if not ss["anim_active"] or ss["anim_paused"]:
         return
-
+    n_pts = ss["anim_n_pts"]
+    stride = ss["anim_stride"]
     end = min(ss["anim_end"], n_pts)
-    if end >= n_pts:
+    if n_pts <= 0 or end >= n_pts:
         ss["anim_active"] = False
         return
-
     next_end = min(end + stride, n_pts)
     ss["anim_end"] = next_end
-    time.sleep(delay)
+    time.sleep(ss["anim_delay_s"])
     st.rerun()
 
 
@@ -940,7 +939,7 @@ if propagation:
     mask_p = I_stim_p != 0
 
     n_pts = len(t_p)
-    _advance_sweep_animation(n_pts, anim_speed)
+    _sync_animation_config(n_pts, anim_speed)
 
     voltage_fig, current_fig = build_propagation_figure(
         t_p, V_traces, iNa_tr_p, i_pas_tr_p, positions_um, mask_p,
@@ -964,10 +963,11 @@ if propagation:
         node_passive=p_nodes,
         node_refrac=refrac_nodes,
     )
+    _step_animation_after_render()
 
 else:
     n_pts = len(t)
-    _advance_sweep_animation(n_pts, anim_speed)
+    _sync_animation_config(n_pts, anim_speed)
 
     voltage_fig, current_fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
     voltage_slot.plotly_chart(voltage_fig, width="stretch")
@@ -982,3 +982,4 @@ else:
         is_running=active and not paused,
         hold_pulse=active and paused,
     )
+    _step_animation_after_render()

@@ -328,10 +328,10 @@ def inject_global_css():
     )
 
 
-def render_neuron_animation(slot, progress=0.0, is_running=False):
+def render_neuron_animation(slot, progress=0.0, is_running=False, hold_pulse=False):
     progress = float(np.clip(progress, 0.0, 1.0))
     signal_offset = -progress * 930
-    signal_opacity = 1.0 if is_running else 0.42
+    signal_opacity = 1.0 if (is_running or hold_pulse) else 0.42
     cyan = THEME["cyan"]
     blue = THEME["blue"]
     amber = THEME["amber"]
@@ -425,13 +425,61 @@ with params_col:
         propagation = st.checkbox("Cable mode", value=False)
         show_refs = st.checkbox("References", value=False)
 
-        action_cols = st.columns(2)
+        for k, v in (
+            ("anim_active", False),
+            ("anim_paused", False),
+            ("anim_end", 0),
+            ("anim_n_pts", 0),
+            ("anim_step", 1),
+            ("anim_stride", 1),
+            ("anim_delay_s", 0.04),
+            ("anim_sig", ""),
+        ):
+            st.session_state.setdefault(k, v)
+
+        anim_sig = "|".join(
+            str(x)
+            for x in (
+                i_inj,
+                stim_on,
+                stim_dur,
+                stim_type_val,
+                train_freq,
+                train_n,
+                win_ms,
+                anim_speed,
+                propagation,
+                show_refs,
+            )
+        )
+        if st.session_state["anim_sig"] != anim_sig:
+            st.session_state["anim_active"] = False
+            st.session_state["anim_paused"] = False
+            st.session_state["anim_end"] = 0
+            st.session_state["anim_sig"] = anim_sig
+
+        action_cols = st.columns(3)
         with action_cols[0]:
             run_btn = st.button("Run", width="stretch", type="primary")
         with action_cols[1]:
+            pause_btn = st.button(
+                "Resume" if st.session_state["anim_paused"] else "Pause",
+                width="stretch",
+                disabled=not st.session_state["anim_active"],
+            )
+        with action_cols[2]:
             if st.button("Reset", width="stretch"):
                 st.session_state.clear()
                 st.rerun()
+
+        if run_btn:
+            st.session_state["anim_active"] = True
+            st.session_state["anim_paused"] = False
+            st.session_state["anim_end"] = 0
+            st.session_state["anim_n_pts"] = 0
+
+        if pause_btn and st.session_state["anim_active"]:
+            st.session_state["anim_paused"] = not st.session_state["anim_paused"]
 
 with main_col:
     st.markdown(
@@ -446,8 +494,6 @@ with main_col:
         unsafe_allow_html=True,
     )
     neuron_slot = st.empty()
-
-render_neuron_animation(neuron_slot, progress=0.0, is_running=run_btn)
 
 # ── Simulation — auto-reruns on every parameter change ───────────────────────
 @st.cache_data
@@ -630,6 +676,44 @@ def _apply_layout(fig, win_ms, title, y_title):
     )
 
 
+def _advance_sweep_animation(n_pts, anim_speed):
+    """Step the sweep once per rerun; supports pause via session_state."""
+    ss = st.session_state
+    step = max(1, n_pts // 200)
+    stride = step * max(1, anim_speed // 3)
+    delay = 0.04 / (anim_speed / 5)
+
+    cfg_changed = (
+        ss["anim_n_pts"] != n_pts
+        or ss["anim_step"] != step
+        or abs(ss["anim_delay_s"] - delay) > 1e-9
+    )
+    if cfg_changed:
+        ss["anim_n_pts"] = n_pts
+        ss["anim_step"] = step
+        ss["anim_stride"] = stride
+        ss["anim_delay_s"] = delay
+        if ss["anim_active"] and ss["anim_end"] == 0:
+            ss["anim_end"] = min(stride, n_pts)
+        else:
+            ss["anim_end"] = min(ss["anim_end"], n_pts)
+        if not ss["anim_active"]:
+            return
+
+    if not ss["anim_active"] or ss["anim_paused"]:
+        return
+
+    end = min(ss["anim_end"], n_pts)
+    if end >= n_pts:
+        ss["anim_active"] = False
+        return
+
+    next_end = min(end + stride, n_pts)
+    ss["anim_end"] = next_end
+    time.sleep(delay)
+    st.rerun()
+
+
 # ── Render ────────────────────────────────────────────────────────────────────
 with main_col:
     voltage_col, current_col = st.columns(2)
@@ -648,47 +732,39 @@ if propagation:
     ])
     mask_p = I_stim_p != 0
 
-    if run_btn:
-        n_pts = len(t_p)
-        step  = max(1, n_pts // 200)
-        delay = 0.04 / (anim_speed / 5)
-        voltage_fig, current_fig = build_propagation_figure(
-            t_p, V_traces, positions_um, mask_p,
-            eNa_p, eK_p, win_ms, show_refs)
-        voltage_slot.plotly_chart(voltage_fig, width="stretch")
-        current_slot.plotly_chart(current_fig, width="stretch")
-        for end in range(step, n_pts + step, step * max(1, anim_speed // 3)):
-            end    = min(end, n_pts)
-            render_neuron_animation(
-                neuron_slot,
-                progress=end / n_pts,
-                is_running=True,
-            )
-            time.sleep(delay)
-    else:
-        voltage_fig, current_fig = build_propagation_figure(
-            t_p, V_traces, positions_um, mask_p,
-            eNa_p, eK_p, win_ms, show_refs)
-        voltage_slot.plotly_chart(voltage_fig, width="stretch")
-        current_slot.plotly_chart(current_fig, width="stretch")
+    n_pts = len(t_p)
+    _advance_sweep_animation(n_pts, anim_speed)
+
+    voltage_fig, current_fig = build_propagation_figure(
+        t_p, V_traces, positions_um, mask_p,
+        eNa_p, eK_p, win_ms, show_refs)
+    voltage_slot.plotly_chart(voltage_fig, width="stretch")
+    current_slot.plotly_chart(current_fig, width="stretch")
+
+    prog = st.session_state["anim_end"] / n_pts if n_pts else 0.0
+    active = st.session_state["anim_active"]
+    paused = st.session_state["anim_paused"]
+    render_neuron_animation(
+        neuron_slot,
+        progress=prog,
+        is_running=active and not paused,
+        hold_pulse=active and paused,
+    )
 
 else:
-    if run_btn:
-        n_pts = len(t)
-        step  = max(1, n_pts // 200)
-        delay = 0.04 / (anim_speed / 5)
-        voltage_fig, current_fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
-        voltage_slot.plotly_chart(voltage_fig, width="stretch")
-        current_slot.plotly_chart(current_fig, width="stretch")
-        for end in range(step, n_pts + step, step * max(1, anim_speed // 3)):
-            end = min(end, n_pts)
-            render_neuron_animation(
-                neuron_slot,
-                progress=end / n_pts,
-                is_running=True,
-            )
-            time.sleep(delay)
-    else:
-        voltage_fig, current_fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
-        voltage_slot.plotly_chart(voltage_fig, width="stretch")
-        current_slot.plotly_chart(current_fig, width="stretch")
+    n_pts = len(t)
+    _advance_sweep_animation(n_pts, anim_speed)
+
+    voltage_fig, current_fig = build_figure(t, V, iNa, iK, iL, stim_mask, eNa, eK, win_ms, show_refs)
+    voltage_slot.plotly_chart(voltage_fig, width="stretch")
+    current_slot.plotly_chart(current_fig, width="stretch")
+
+    prog = st.session_state["anim_end"] / n_pts if n_pts else 0.0
+    active = st.session_state["anim_active"]
+    paused = st.session_state["anim_paused"]
+    render_neuron_animation(
+        neuron_slot,
+        progress=prog,
+        is_running=active and not paused,
+        hold_pulse=active and paused,
+    )

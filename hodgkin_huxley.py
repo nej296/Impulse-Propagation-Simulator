@@ -217,8 +217,8 @@ def run_propagation(
 
     n_comp compartments of length dx_um µm each, coupled axially with g_coupling
     (mS/cm²). Stimulus injected at compartment 0 only. Returns, at five evenly
-    spaced positions: V_m, local I_Na, and upstream axial coupling current
-    (passive depolarizing drive from the neighbor toward the soma).
+    spaced positions: V_m, local I_Na, upstream axial coupling current
+    (passive depolarizing drive), and Na⁺ inactivation h (for refractory-period demos).
     """
     eNa = nernst(1, NA_OUT, NA_IN)
     eK  = nernst(1, K_OUT, K_IN)
@@ -290,10 +290,11 @@ def run_propagation(
     V_traces = [V[:, i] for i in record_idx]
     iNa_traces = [iNa[:, i] for i in record_idx]
     i_pas_traces = [i_ax_upstream[:, i] for i in record_idx]
+    h_traces = [h[:, i] for i in record_idx]
 
     positions_um = [i * dx_um for i in record_idx]
 
-    return t, V_traces, positions_um, iNa_traces, i_pas_traces, eNa, eK, eL
+    return t, V_traces, positions_um, iNa_traces, i_pas_traces, h_traces, eNa, eK, eL
 
 
 if __name__ == "__main__":

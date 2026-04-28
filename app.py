@@ -6,7 +6,8 @@ import time
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
-from hodgkin_huxley import run_simulation, run_propagation, get_i_inj, V_REST
+from plotly.subplots import make_subplots
+from hodgkin_huxley import run_simulation, run_propagation, get_i_inj, V_REST, h_inf
 
 st.set_page_config(
     page_title="Hodgkin-Huxley Neuron Simulator",
@@ -335,16 +336,19 @@ def render_neuron_animation(
     hold_pulse=False,
     node_active=None,
     node_passive=None,
+    node_refrac=None,
 ):
     """Axon schematic. If node_active / node_passive (0–1 per recording site) are
     provided, draws local Na⁺ regeneration (amber) vs upstream axial coupling (blue)
-    at cable sample points; otherwise falls back to a traveling pulse."""
+    at cable sample points; node_refrac (0–1) adds a rose ring for Na⁺ inactivation /
+    refractoriness. Otherwise falls back to a traveling pulse."""
     progress = float(np.clip(progress, 0.0, 1.0))
     signal_offset = -progress * 930
     signal_opacity = 1.0 if (is_running or hold_pulse) else 0.42
     cyan = THEME["cyan"]
     blue = THEME["blue"]
     amber = THEME["amber"]
+    rose = THEME["rose"]
     ink = THEME["ink"]
     muted = THEME["muted"]
     line = THEME["line"]
@@ -365,10 +369,21 @@ def render_neuron_animation(
             r_act = 5.0 + 14.0 * a
             op_pass = 0.10 + 0.45 * p
             op_act = 0.30 + 0.70 * a
+            r_fr = 0.0
+            if node_refrac is not None and j < len(node_refrac):
+                r_fr = float(np.clip(node_refrac[j], 0.0, 1.0))
+            refractory_ring = ""
+            if r_fr > 0.05:
+                refractory_ring = (
+                    f'<circle r="{r_act + 7.0:.1f}" fill="none" stroke="{rose}" '
+                    f'stroke-width="{1.2 + 4.0 * r_fr:.1f}" '
+                    f'opacity="{0.22 + 0.58 * r_fr:.2f}" />'
+                )
             segment_nodes += f"""
 <g transform="translate({nx:.1f},{ny:.1f})">
 <circle r="{r_pass:.1f}" fill="{blue}" opacity="{op_pass:.2f}" />
 <circle r="{r_act:.1f}" fill="{amber}" opacity="{op_act:.2f}" filter="url(#pulse-glow)" />
+{refractory_ring}
 </g>"""
     else:
         traveling = f"""<g filter="url(#pulse-glow)" opacity="{signal_opacity:.2f}">
@@ -457,6 +472,12 @@ with params_col:
         win_ms = st.slider("Window (ms)", min_value=20, max_value=300, value=100, step=10)
         anim_speed = st.slider("Speed", 1, 10, 5)
         propagation = st.checkbox("Cable mode", value=False)
+        stacked_vm = st.checkbox(
+            "Stacked V_m (textbook)",
+            value=False,
+            disabled=not propagation,
+            help="Subplot per recording site—passive depolarization and delayed spike line up like lecture slides.",
+        )
         show_refs = st.checkbox("References", value=False)
 
         for k, v in (
@@ -483,6 +504,7 @@ with params_col:
                 win_ms,
                 anim_speed,
                 propagation,
+                stacked_vm,
                 show_refs,
             )
         )
@@ -626,34 +648,143 @@ def build_figure(t_s, V_s, iNa_s, iK_s, iL_s, mask_s, eNa, eK, win_ms, show_refs
     return voltage_fig, current_fig
 
 
-# ── Plotly figure (propagation — 5 traces) ───────────────────────────────────
-def build_propagation_figure(
-    t_s, V_traces_s, iNa_traces_s, i_pas_traces_s, positions_um, mask_s, eNa, eK, win_ms, show_refs
-):
-    voltage_fig = go.Figure()
-    current_fig = go.Figure()
-    _add_stim_shading(voltage_fig, mask_s, t_s)
-    _add_stim_shading(current_fig, mask_s, t_s)
-
+# ── Plotly figure (propagation — voltage + currents) ─────────────────────────
+def build_propagation_voltage_stack(t_s, V_traces_s, positions_um, mask_s, eNa, eK, win_ms, show_refs):
+    n = len(V_traces_s)
+    titles = tuple(f"V_m @ {p} µm" for p in positions_um)
+    fig = make_subplots(
+        rows=n,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.034,
+        subplot_titles=titles,
+    )
     for i, (V_s, pos_um) in enumerate(zip(V_traces_s, positions_um)):
-        label = f"{pos_um} µm"
-        voltage_fig.add_trace(go.Scatter(
-            x=t_s, y=V_s, mode="lines", name=label,
-            line=dict(color=_PROP_COLORS[i], width=2),
-            hovertemplate=f"<b>{label}</b><br>t = %{{x:.2f}} ms<br>V_m = %{{y:.2f}} mV<extra></extra>",
-        ))
+        row = i + 1
+        for s, e in zip(*_stim_intervals(mask_s, t_s)):
+            fig.add_vrect(
+                x0=s, x1=e, fillcolor=THEME["amber"], opacity=0.14,
+                layer="below", line_width=0, row=row, col=1,
+            )
+        c = _PROP_COLORS[i]
+        fig.add_trace(
+            go.Scatter(
+                x=t_s, y=V_s, mode="lines",
+                line=dict(color=c, width=2.1),
+                hovertemplate=(
+                    f"<b>{pos_um} µm</b><br>t = %{{x:.2f}} ms<br>"
+                    "V_m = %{y:.2f} mV<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=row, col=1,
+        )
+        if show_refs:
+            for y_val, color in [
+                (eNa, THEME["rose"]),
+                (eK, THEME["blue"]),
+                (V_REST, THEME["muted"]),
+                (-55, THEME["amber"]),
+            ]:
+                fig.add_hline(
+                    y=y_val, line_dash="dash", line_color=color, line_width=1,
+                    opacity=0.52, row=row, col=1,
+                )
 
-    if show_refs:
-        for y_val, color, label in [
-            (eNa,    THEME["rose"],  f"E_Na ({eNa:.0f} mV)"),
-            (eK,     THEME["blue"],  f"E_K ({eK:.0f} mV)"),
-            (V_REST, THEME["muted"], f"Rest ({V_REST} mV)"),
-            (-55,    THEME["amber"], "Threshold (−55 mV)"),
-        ]:
-            voltage_fig.add_hline(y=y_val, line_dash="dash", line_color=color, line_width=1,
-                                  opacity=0.6, annotation_text=label,
-                                  annotation_position="right",
-                                  annotation_font=dict(size=8, color=color))
+    tick_step = _xtick_step(win_ms)
+    xticks = list(np.arange(0, win_ms + tick_step, tick_step))
+    row_h = min(124, max(88, 540 // n))
+    fig.update_layout(
+        plot_bgcolor="rgba(5, 7, 13, 0)",
+        paper_bgcolor="rgba(5, 7, 13, 0)",
+        hovermode="x unified",
+        height=72 + n * row_h,
+        margin=dict(l=72, r=26, t=52, b=44),
+        title=dict(text="<b>Voltage (stacked)</b>", x=0.5, xanchor="center"),
+        font=dict(color=THEME["ink"], size=10, family="IBM Plex Mono, monospace"),
+        title_font=dict(color=THEME["ink"]),
+        showlegend=False,
+        hoverlabel=dict(
+            bgcolor=THEME["panel"],
+            bordercolor=THEME["cyan"],
+            font=dict(color=THEME["ink"], family="IBM Plex Mono, monospace"),
+        ),
+    )
+    fig.update_annotations(font_size=10, font_color=THEME["muted"])
+    for r in range(1, n + 1):
+        fig.update_yaxes(
+            range=[-100, 80], row=r, col=1,
+            showgrid=True, gridcolor="rgba(105, 167, 255, 0.08)",
+            showline=True, linecolor=THEME["line"], tickcolor=THEME["line"],
+            ticks="outside", mirror=False,
+        )
+        fig.update_xaxes(
+            range=[0, win_ms], tickvals=xticks,
+            showgrid=True, gridcolor="rgba(105, 167, 255, 0.08)",
+            showline=True, linecolor=THEME["line"], tickcolor=THEME["line"],
+            ticks="outside", row=r, col=1,
+        )
+    for r in range(1, n):
+        fig.update_xaxes(showticklabels=False, row=r, col=1)
+    fig.update_xaxes(title_text="Time (ms)", row=n, col=1)
+    fig.add_annotation(
+        text="Vm (mV)",
+        xref="paper",
+        yref="paper",
+        x=-0.12,
+        y=0.5,
+        textangle=-90,
+        showarrow=False,
+        font=dict(color=THEME["ink"], size=12, family="IBM Plex Mono, monospace"),
+    )
+    return fig
+
+
+def build_propagation_figure(
+    t_s,
+    V_traces_s,
+    iNa_traces_s,
+    i_pas_traces_s,
+    positions_um,
+    mask_s,
+    eNa,
+    eK,
+    win_ms,
+    show_refs,
+    stacked_voltage=False,
+):
+    if stacked_voltage:
+        voltage_fig = build_propagation_voltage_stack(
+            t_s, V_traces_s, positions_um, mask_s, eNa, eK, win_ms, show_refs
+        )
+    else:
+        voltage_fig = go.Figure()
+        _add_stim_shading(voltage_fig, mask_s, t_s)
+        for i, (V_s, pos_um) in enumerate(zip(V_traces_s, positions_um)):
+            label = f"{pos_um} µm"
+            voltage_fig.add_trace(go.Scatter(
+                x=t_s, y=V_s, mode="lines", name=label,
+                line=dict(color=_PROP_COLORS[i], width=2),
+                hovertemplate=f"<b>{label}</b><br>t = %{{x:.2f}} ms<br>V_m = %{{y:.2f}} mV<extra></extra>",
+            ))
+
+        if show_refs:
+            for y_val, color, label in [
+                (eNa,    THEME["rose"],  f"E_Na ({eNa:.0f} mV)"),
+                (eK,     THEME["blue"],  f"E_K ({eK:.0f} mV)"),
+                (V_REST, THEME["muted"], f"Rest ({V_REST} mV)"),
+                (-55,    THEME["amber"], "Threshold (−55 mV)"),
+            ]:
+                voltage_fig.add_hline(y=y_val, line_dash="dash", line_color=color, line_width=1,
+                                      opacity=0.6, annotation_text=label,
+                                      annotation_position="right",
+                                      annotation_font=dict(size=8, color=color))
+
+        _apply_layout(voltage_fig, win_ms, "Voltage", "Vm (mV)")
+        voltage_fig.update_yaxes(range=[-100, 80])
+
+    current_fig = go.Figure()
+    _add_stim_shading(current_fig, mask_s, t_s)
 
     # Solid = local inward Na⁺ (regenerative / active); dotted = upstream axial coupling (passive spread)
     for i, (iNa_loc, i_pas, pos_um) in enumerate(
@@ -679,9 +810,7 @@ def build_propagation_figure(
         ))
     current_fig.add_hline(y=0, line_color=THEME["line"], line_width=1)
 
-    _apply_layout(voltage_fig, win_ms, "Voltage", "Vm (mV)")
     _apply_layout(current_fig, win_ms, "Active vs passive current", "µA/cm²")
-    voltage_fig.update_yaxes(range=[-100, 80])
     return voltage_fig, current_fig
 
 
@@ -745,6 +874,15 @@ def _propagation_animation_nodes(iNa_traces, i_pas_traces, t_idx):
     return node_act, node_pas
 
 
+def _propagation_refrac_nodes(h_traces, t_idx):
+    """Refractory cue from Na⁺ inactivation h (Chapter 3: limits re-excitation)."""
+    h_rest = max(float(h_inf(V_REST)), 1e-6)
+    return [
+        float(np.clip(1.0 - float(tr[t_idx]) / h_rest, 0.0, 1.0))
+        for tr in h_traces
+    ]
+
+
 def _advance_sweep_animation(n_pts, anim_speed):
     """Step the sweep once per rerun; supports pause via session_state."""
     ss = st.session_state
@@ -791,7 +929,7 @@ with main_col:
 
 if propagation:
     with st.spinner("Running cable model…"):
-        t_p, V_traces, positions_um, iNa_tr_p, i_pas_tr_p, eNa_p, eK_p, _eLp = cached_propagation(
+        t_p, V_traces, positions_um, iNa_tr_p, i_pas_tr_p, h_tr_p, eNa_p, eK_p, _eLp = cached_propagation(
             i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
         )
 
@@ -806,7 +944,8 @@ if propagation:
 
     voltage_fig, current_fig = build_propagation_figure(
         t_p, V_traces, iNa_tr_p, i_pas_tr_p, positions_um, mask_p,
-        eNa_p, eK_p, win_ms, show_refs)
+        eNa_p, eK_p, win_ms, show_refs, stacked_voltage=stacked_vm,
+    )
     voltage_slot.plotly_chart(voltage_fig, width="stretch")
     current_slot.plotly_chart(current_fig, width="stretch")
 
@@ -815,6 +954,7 @@ if propagation:
     paused = st.session_state["anim_paused"]
     t_idx = min(max(st.session_state["anim_end"], 0), max(0, n_pts - 1))
     na_nodes, p_nodes = _propagation_animation_nodes(iNa_tr_p, i_pas_tr_p, t_idx)
+    refrac_nodes = _propagation_refrac_nodes(h_tr_p, t_idx)
     render_neuron_animation(
         neuron_slot,
         progress=prog,
@@ -822,6 +962,7 @@ if propagation:
         hold_pulse=active and paused,
         node_active=na_nodes,
         node_passive=p_nodes,
+        node_refrac=refrac_nodes,
     )
 
 else:

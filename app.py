@@ -328,7 +328,17 @@ def inject_global_css():
     )
 
 
-def render_neuron_animation(slot, progress=0.0, is_running=False, hold_pulse=False):
+def render_neuron_animation(
+    slot,
+    progress=0.0,
+    is_running=False,
+    hold_pulse=False,
+    node_active=None,
+    node_passive=None,
+):
+    """Axon schematic. If node_active / node_passive (0–1 per recording site) are
+    provided, draws local Na⁺ regeneration (amber) vs upstream axial coupling (blue)
+    at cable sample points; otherwise falls back to a traveling pulse."""
     progress = float(np.clip(progress, 0.0, 1.0))
     signal_offset = -progress * 930
     signal_opacity = 1.0 if (is_running or hold_pulse) else 0.42
@@ -340,8 +350,34 @@ def render_neuron_animation(slot, progress=0.0, is_running=False, hold_pulse=Fal
     line = THEME["line"]
     panel = THEME["panel"]
     panel_alt = THEME["panel_alt"]
+
+    segment_nodes = ""
+    traveling = ""
+    if node_active is not None and node_passive is not None and len(node_active) == len(node_passive):
+        n_nodes = len(node_active)
+        for j in range(n_nodes):
+            s = j / max(1, n_nodes - 1)
+            nx = 174.0 + 854.0 * s
+            ny = 118.0 - 4.0 * float(np.sin(np.pi * s))
+            a = float(np.clip(node_active[j], 0.0, 1.0))
+            p = float(np.clip(node_passive[j], 0.0, 1.0))
+            r_pass = 8.0 + 24.0 * p
+            r_act = 5.0 + 14.0 * a
+            op_pass = 0.10 + 0.45 * p
+            op_act = 0.30 + 0.70 * a
+            segment_nodes += f"""
+<g transform="translate({nx:.1f},{ny:.1f})">
+<circle r="{r_pass:.1f}" fill="{blue}" opacity="{op_pass:.2f}" />
+<circle r="{r_act:.1f}" fill="{amber}" opacity="{op_act:.2f}" filter="url(#pulse-glow)" />
+</g>"""
+    else:
+        traveling = f"""<g filter="url(#pulse-glow)" opacity="{signal_opacity:.2f}">
+<path pathLength="1000" d="M174 118 C270 104 344 108 430 118 S612 133 730 118 S900 102 1028 118" fill="none" stroke="{amber}" stroke-width="20" stroke-linecap="round" stroke-dasharray="46 954" stroke-dashoffset="{signal_offset:.1f}" />
+<path pathLength="1000" d="M174 118 C270 104 344 108 430 118 S612 133 730 118 S900 102 1028 118" fill="none" stroke="{amber}" stroke-opacity="0.22" stroke-width="38" stroke-linecap="round" stroke-dasharray="70 930" stroke-dashoffset="{signal_offset:.1f}" />
+</g>"""
+
     html = f"""<div class="axon-stage">
-<svg viewBox="0 0 1200 230" role="img" aria-label="Animated neuron with an action potential moving along the axon">
+<svg viewBox="0 0 1200 230" role="img" aria-label="Animated neuron: passive axial spread and active Na regeneration along the axon">
 <defs>
 <filter id="pulse-glow" x="-80%" y="-80%" width="260%" height="260%">
 <feGaussianBlur stdDeviation="8" result="blur" />
@@ -372,10 +408,8 @@ def render_neuron_animation(slot, progress=0.0, is_running=False, hold_pulse=Fal
 <circle cx="1048" cy="118" r="29" fill="{panel_alt}" stroke="{cyan}" stroke-opacity="0.74" stroke-width="5" />
 <circle cx="1048" cy="118" r="11" fill="{blue}" opacity="0.58" />
 </g>
-<g filter="url(#pulse-glow)" opacity="{signal_opacity:.2f}">
-<path pathLength="1000" d="M174 118 C270 104 344 108 430 118 S612 133 730 118 S900 102 1028 118" fill="none" stroke="{amber}" stroke-width="20" stroke-linecap="round" stroke-dasharray="46 954" stroke-dashoffset="{signal_offset:.1f}" />
-<path pathLength="1000" d="M174 118 C270 104 344 108 430 118 S612 133 730 118 S900 102 1028 118" fill="none" stroke="{amber}" stroke-opacity="0.22" stroke-width="38" stroke-linecap="round" stroke-dasharray="70 930" stroke-dashoffset="{signal_offset:.1f}" />
-</g>
+{segment_nodes}
+{traveling}
 <text x="182" y="199" fill="{muted}" font-family="IBM Plex Mono, monospace" font-size="13">soma</text>
 <text x="1010" y="201" fill="{muted}" font-family="IBM Plex Mono, monospace" font-size="13">axon terminal</text>
 </svg>
@@ -487,7 +521,9 @@ with main_col:
         <section class="hero">
             <h1>Impulse Propagation Simulator</h1>
             <p>
-                This is an educational tool to help students understand how a impulse proagates down an axon
+                Explore voltage-dependent Na⁺ and K⁺ currents (Chapter 3), threshold and regeneration,
+                and—in cable mode—how passive spread along the axon recruits the next segment’s active
+                response so the impulse stays full-sized.
             </p>
         </section>
         """,
@@ -565,24 +601,35 @@ def build_figure(t_s, V_s, iNa_s, iK_s, iL_s, mask_s, eNa, eK, win_ms, show_refs
                                   annotation_position="right",
                                   annotation_font=dict(size=8, color=color))
 
-    i_total_s = iNa_s + iK_s + iL_s
+    # Chapter 3: early inward Na⁺ vs delayed outward K⁺ (HH ionic currents)
     current_fig.add_trace(go.Scatter(
-        x=t_s, y=i_total_s, mode="lines", name="I_membrane",
-        line=dict(color=THEME["amber"], width=2.5),
-        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_m = %{y:.2f} µA/cm²<extra></extra>",
+        x=t_s, y=-iNa_s, mode="lines", name="−I_Na",
+        line=dict(color=THEME["rose"], width=2.4),
+        hovertemplate="<b>t = %{x:.2f} ms</b><br>−I_Na (inward) = %{y:.2f} µA/cm²<extra></extra>",
+    ))
+    current_fig.add_trace(go.Scatter(
+        x=t_s, y=iK_s, mode="lines", name="I_K",
+        line=dict(color=THEME["blue"], width=2.2),
+        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_K = %{y:.2f} µA/cm²<extra></extra>",
+    ))
+    current_fig.add_trace(go.Scatter(
+        x=t_s, y=iL_s, mode="lines", name="I_L",
+        line=dict(color=THEME["green"], width=1.4, dash="dot"),
+        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_L = %{y:.2f} µA/cm²<extra></extra>",
     ))
 
     current_fig.add_hline(y=0, line_color=THEME["line"], line_width=1)
 
     _apply_layout(voltage_fig, win_ms, "Voltage", "Vm (mV)")
-    _apply_layout(current_fig, win_ms, "Current", "I")
+    _apply_layout(current_fig, win_ms, "Ionic current", "µA/cm²")
     voltage_fig.update_yaxes(range=[-100, 80])
     return voltage_fig, current_fig
 
 
 # ── Plotly figure (propagation — 5 traces) ───────────────────────────────────
-def build_propagation_figure(t_s, V_traces_s, positions_um, mask_s, eNa, eK,
-                              win_ms, show_refs):
+def build_propagation_figure(
+    t_s, V_traces_s, iNa_traces_s, i_pas_traces_s, positions_um, mask_s, eNa, eK, win_ms, show_refs
+):
     voltage_fig = go.Figure()
     current_fig = go.Figure()
     _add_stim_shading(voltage_fig, mask_s, t_s)
@@ -608,19 +655,32 @@ def build_propagation_figure(t_s, V_traces_s, positions_um, mask_s, eNa, eK,
                                   annotation_position="right",
                                   annotation_font=dict(size=8, color=color))
 
-    I_stim_s = np.array([
-        get_i_inj(ti, i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n)
-        for ti in t_s
-    ])
-    current_fig.add_trace(go.Scatter(
-        x=t_s, y=I_stim_s, mode="lines", name="I_inj",
-        line=dict(color=THEME["amber"], width=2.5),
-        hovertemplate="<b>t = %{x:.2f} ms</b><br>I_inj = %{y:.2f} µA/cm²<extra></extra>",
-    ))
+    # Solid = local inward Na⁺ (regenerative / active); dotted = upstream axial coupling (passive spread)
+    for i, (iNa_loc, i_pas, pos_um) in enumerate(
+        zip(iNa_traces_s, i_pas_traces_s, positions_um)
+    ):
+        c = _PROP_COLORS[i]
+        loc_lbl = f"{pos_um} µm"
+        current_fig.add_trace(go.Scatter(
+            x=t_s, y=-iNa_loc, mode="lines",
+            line=dict(color=c, width=2.2),
+            hovertemplate=(
+                f"<b>{loc_lbl} · Na⁺ active (−I_Na)</b><br>"
+                "t = %{x:.2f} ms<br>%{y:.2f} µA/cm²<extra></extra>"
+            ),
+        ))
+        current_fig.add_trace(go.Scatter(
+            x=t_s, y=i_pas, mode="lines",
+            line=dict(color=c, width=2.0, dash="dot"),
+            hovertemplate=(
+                f"<b>{loc_lbl} · passive axial</b><br>"
+                "t = %{x:.2f} ms<br>%{y:.2f} µA/cm²<extra></extra>"
+            ),
+        ))
     current_fig.add_hline(y=0, line_color=THEME["line"], line_width=1)
 
     _apply_layout(voltage_fig, win_ms, "Voltage", "Vm (mV)")
-    _apply_layout(current_fig, win_ms, "Current", "I")
+    _apply_layout(current_fig, win_ms, "Active vs passive current", "µA/cm²")
     voltage_fig.update_yaxes(range=[-100, 80])
     return voltage_fig, current_fig
 
@@ -642,13 +702,7 @@ def _apply_layout(fig, win_ms, title, y_title):
         title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center"),
         font=dict(color=THEME["ink"], size=11, family="IBM Plex Mono, monospace"),
         title_font=dict(color=THEME["ink"]),
-        legend=dict(
-            x=1.02, y=0.98,
-            bgcolor="rgba(12, 18, 32, 0.84)",
-            bordercolor="rgba(105, 167, 255, 0.22)",
-            borderwidth=1,
-            font=dict(color=THEME["ink"]),
-        ),
+        showlegend=False,
         hoverlabel=dict(
             bgcolor=THEME["panel"],
             bordercolor=THEME["cyan"],
@@ -674,6 +728,21 @@ def _apply_layout(fig, win_ms, title, y_title):
         showarrow=False,
         font=dict(color=THEME["ink"], size=12, family="IBM Plex Mono, monospace"),
     )
+
+
+def _propagation_animation_nodes(iNa_traces, i_pas_traces, t_idx):
+    """Normalize recorded traces for axon-node highlights (active vs passive)."""
+    act_stack = np.stack([-np.asarray(tr, dtype=float) for tr in iNa_traces], axis=0)
+    pas_stack = np.maximum(0.0, np.stack([np.asarray(tr, dtype=float) for tr in i_pas_traces], axis=0))
+    act_scale = float(np.percentile(act_stack, 99)) if act_stack.size else 0.0
+    act_scale = max(act_scale, 1e-6)
+    pas_scale = float(np.percentile(pas_stack, 99)) if pas_stack.size else 0.0
+    pas_scale = max(pas_scale, 1e-6)
+    node_act, node_pas = [], []
+    for j in range(len(iNa_traces)):
+        node_act.append(float(np.clip(-iNa_traces[j][t_idx] / act_scale, 0.0, 1.0)))
+        node_pas.append(float(np.clip(max(0.0, i_pas_traces[j][t_idx]) / pas_scale, 0.0, 1.0)))
+    return node_act, node_pas
 
 
 def _advance_sweep_animation(n_pts, anim_speed):
@@ -722,7 +791,7 @@ with main_col:
 
 if propagation:
     with st.spinner("Running cable model…"):
-        t_p, V_traces, positions_um, eNa_p, eK_p, _ = cached_propagation(
+        t_p, V_traces, positions_um, iNa_tr_p, i_pas_tr_p, eNa_p, eK_p, _eLp = cached_propagation(
             i_inj, stim_on, stim_dur, stim_type_val, train_freq, train_n, win_ms
         )
 
@@ -736,7 +805,7 @@ if propagation:
     _advance_sweep_animation(n_pts, anim_speed)
 
     voltage_fig, current_fig = build_propagation_figure(
-        t_p, V_traces, positions_um, mask_p,
+        t_p, V_traces, iNa_tr_p, i_pas_tr_p, positions_um, mask_p,
         eNa_p, eK_p, win_ms, show_refs)
     voltage_slot.plotly_chart(voltage_fig, width="stretch")
     current_slot.plotly_chart(current_fig, width="stretch")
@@ -744,11 +813,15 @@ if propagation:
     prog = st.session_state["anim_end"] / n_pts if n_pts else 0.0
     active = st.session_state["anim_active"]
     paused = st.session_state["anim_paused"]
+    t_idx = min(max(st.session_state["anim_end"], 0), max(0, n_pts - 1))
+    na_nodes, p_nodes = _propagation_animation_nodes(iNa_tr_p, i_pas_tr_p, t_idx)
     render_neuron_animation(
         neuron_slot,
         progress=prog,
         is_running=active and not paused,
         hold_pulse=active and paused,
+        node_active=na_nodes,
+        node_passive=p_nodes,
     )
 
 else:

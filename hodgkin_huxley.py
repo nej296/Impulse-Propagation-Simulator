@@ -216,8 +216,9 @@ def run_propagation(
     """Multi-compartment cable model.
 
     n_comp compartments of length dx_um µm each, coupled axially with g_coupling
-    (mS/cm²). Stimulus injected at compartment 0 only. Returns V traces at 5
-    evenly spaced positions.
+    (mS/cm²). Stimulus injected at compartment 0 only. Returns, at five evenly
+    spaced positions: V_m, local I_Na, and upstream axial coupling current
+    (passive depolarizing drive from the neighbor toward the soma).
     """
     eNa = nernst(1, NA_OUT, NA_IN)
     eK  = nernst(1, K_OUT, K_IN)
@@ -273,11 +274,26 @@ def run_propagation(
 
     t   = sol.t
     y3d = sol.y.T.reshape(len(t), n_comp, 4)
+    V = y3d[:, :, 0]
+    m = y3d[:, :, 1]
+    h = y3d[:, :, 2]
+    n = y3d[:, :, 3]
 
-    V_traces     = [y3d[:, i, 0] for i in record_idx]
-    positions_um = [i * dx_um    for i in record_idx]
+    iNa = G_NA * m**3 * h * (V - eNa)
+    iK = G_K * n**4 * (V - eK)
+    # Local axial current from the immediate upstream (soma-side) neighbor: positive
+    # when the neighbor is more depolarized — the “passive spread” that precedes
+    # local Na channel opening at the next site (Chapter 3: passive then active).
+    i_ax_upstream = np.zeros_like(V)
+    i_ax_upstream[:, 1:] = g_coupling * (V[:, :-1] - V[:, 1:])
 
-    return t, V_traces, positions_um, eNa, eK, eL
+    V_traces = [V[:, i] for i in record_idx]
+    iNa_traces = [iNa[:, i] for i in record_idx]
+    i_pas_traces = [i_ax_upstream[:, i] for i in record_idx]
+
+    positions_um = [i * dx_um for i in record_idx]
+
+    return t, V_traces, positions_um, iNa_traces, i_pas_traces, eNa, eK, eL
 
 
 if __name__ == "__main__":
